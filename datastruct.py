@@ -57,23 +57,16 @@ def _ammend_closure(cls, func):
             cell.cell_contents = cls
 
 
-def _update_transform(field_attr: str, field_type: type[Any], transformer):
+def _update_transform(field_attr: str, field_type: type[Any], transformer: Any, struct_type: Any):
 
     @functools.wraps(transformer)
     def capture_class(cls=None, /, **kwargs):
 
+
         def struct_transform(cls):
-            nonlocal kwargs, field_attr, field_type, transformer
+            nonlocal kwargs, field_attr, field_type, transformer, struct_type
 
-            bases = []
-            for b in cls.__bases__:
-                tp = type(b)
-                if tp not in bases:
-                    bases.append(tp)
-            if not any(issubclass(tp, StructTypeBase) for tp in bases):
-                bases.insert(0, StructTypeBase)
-
-            class DataStructType(*types.resolve_bases(bases)):
+            class DataStructType(struct_type):
                 FIELD_ATTR     = field_attr
                 FIELD_TYPE     = field_type
                 TRANSFORMER    = transformer
@@ -87,7 +80,7 @@ def _update_transform(field_attr: str, field_type: type[Any], transformer):
                 TRANSFORM_DEFAULTS = types.MappingProxyType(kwargs)
 
                 def __new__(mcls, name, bases, namespace, **kwargs):
-                    # prevent older `StructType` parents from running
+                    # signal older `StructType` parents to skip processing
                     build_struct = False
                     if '_struct_flag' not in namespace:
                         build_struct = namespace['_struct_flag'] = True
@@ -107,11 +100,12 @@ def _update_transform(field_attr: str, field_type: type[Any], transformer):
                     cls = super().__new__(mcls, name, bases, namespace, **kwargs)
                     if '_struct_flag' in cls.__dict__:
                         delattr(cls, '_struct_flag')
-                    # the second check avoids inf recursion when the transformer rebuilds a class
+                    # This check avoids inf recursion if the transformer rebuilds the
+                    # class e.g. `dataclass(slots=True`)`.
                     if not build_struct or mcls.FIELD_ATTR in cls.__dict__:
                         return cls
 
-                    # grab this beforehand
+                    # XXX: Maybe allow the transform the chance to update `__slots__`...?
                     class_slots = cls.__dict__.get('__slots__', ())
 
                     cls = mcls.TRANSFORMER(cls, **tsfm_kwargs)  # type: ignore
@@ -145,8 +139,9 @@ def _update_transform(field_attr: str, field_type: type[Any], transformer):
 
             cls = DataStructType(cls.__name__, cls.__bases__, class_dict, **kwargs)
 
-            del bases, class_dict, kwargs, field_attr, field_type, transformer
+            del class_dict, kwargs, field_attr, field_type, transformer
             return cls  # type: ignore
+
 
         kwargs.pop('slots', None)
         kwargs.pop('weakref_slot', None)
@@ -155,7 +150,8 @@ def _update_transform(field_attr: str, field_type: type[Any], transformer):
         return struct_transform(cls)
 
 
-    StructTypeBase = DataStructType
+    if struct_type is None:
+        struct_type = DataStructType
     return capture_class
 
 
@@ -178,10 +174,10 @@ def is_datastruct(o: Any | type[Any]) -> bool:
 
 
 @overload
-def datastruct_transformer(field_attr: str, field_type: type[Any], /, transform: Callable[_P, _T]) -> Callable[_P, _T]: ...
+def datastruct_transformer(field_attr: str, field_type: type[Any], /, transform: Callable[_P, _T], *, struct_type: type[DataStructType] | None = ...) -> Callable[_P, _T]: ...
 @overload
-def datastruct_transformer(field_attr: str, field_type: type[Any], /) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
-def datastruct_transformer(field_attr: str, field_type: type[Any], /, transform: Any = None):
+def datastruct_transformer(field_attr: str, field_type: type[Any], /, *, struct_type: type[DataStructType] | None = ...) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
+def datastruct_transformer(field_attr: str, field_type: type[Any], /, transform: Any = None, *, struct_type: Any = None):
     """Augment the behavior of an existing dataclass transform.
     Can be used as a decorator.
 
@@ -208,11 +204,10 @@ def datastruct_transformer(field_attr: str, field_type: type[Any], /, transform:
         positional-only argument, followed by one or more optional,
         non-positional-only, non-variadic arguments.
 
+        - struct_type: A metaclass derived from `DataStructType`.
+        If provided, it will be used as the base class for the
+        dedicated metaclass created for the updated transform.
 
-    A class that is directly updated using the augmented transform
-    is reconstructed using a custom metaclass derived from `DataStructType`
-    and all unique metaclasses found amongst its' bases. Metaclass
-    conflicts should be extremely rare.
 
     Keyword arguments passed directly to the augmented transform
     are stored as defaults for transforms made with the affected class.
@@ -228,19 +223,30 @@ def datastruct_transformer(field_attr: str, field_type: type[Any], /, transform:
     standard library) does not allow users to declare `__slots__`
     when passing `slots=True` to the transform (at the time of writing).
 
+    A class that is directly updated using the augmented transform
+    is reconstructed using a custom metaclass derived from `DataStructType`.
+    Metaclass conflicts should be solved by creating a subclass of
+    `DataStructType` and the other conflicting metaclasses, then passing
+    the newly derived metaclass via the *struct_type* keyword argument.
+    When passing a user-defined `DataStructType` subclass, its' `__new__`
+    method (if defined) must call `super().__new__`.
+
     A base transform class should be decorated with `dataclass_transform`
     to keep type checkers happy.
     """
 
     def capture_transform(transformer: Callable[_P, _T]) -> Callable[_P, _T]:
-        return _update_transform(field_attr, field_type, transformer)  # type: ignore
+        return _update_transform(field_attr, field_type, transformer, struct_type)  # type: ignore
 
     if transform is None:
         return capture_transform
     return capture_transform(transform)
 
 
-dataclass_struct = _cast_object(
+# Needs to be cast as `dataclasses.dataclass` so type checkers don't
+# "forget" it's a transform -- `dataclass_transform` can only be used
+# as a decorator.
+datastruct = _cast_object(
     datastruct_transformer(
         '__dataclass_fields__',
         dataclasses.Field,
