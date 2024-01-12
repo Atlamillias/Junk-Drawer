@@ -5,7 +5,7 @@ import functools
 import itertools
 import dataclasses
 from typing import (
-    Any, Callable, Mapping,
+    Any, Callable, Mapping, Generator,
     TypeVar, ParamSpec,
     overload, dataclass_transform as dataclass_transform
 )
@@ -14,6 +14,7 @@ from typing import (
 _T = TypeVar("_T")
 _P = ParamSpec("_P")
 
+_MISSING = object()
 
 
 
@@ -22,10 +23,17 @@ def _cast_object(target: Any, source: _T) -> _T:
 
 
 def _slotted_members(cls: type) -> list[str]:
+    # This is an expensive procedure, but it cannot be cached -- class
+    # dictionaries are mutable. Slots found on a class once may not
+    # exist later (unlikely, but possible).
+    member_descriptor = types.MemberDescriptorType
     _seen = set()
     return list(itertools.chain(*(
-        (s for s in _cls.__dict__.get('__slots__', ()) if s not in _seen and not _seen.add(s))
-        for _cls in cls.mro()
+        (
+            s for s, v in tp.__dict__.items()
+            if isinstance(v, member_descriptor) and s not in _seen and not _seen.add(s)
+        )
+        for tp in cls.mro()[:-1]
     )))
 
 
@@ -105,21 +113,16 @@ def _update_transform(field_attr: str, field_type: type[Any], transformer: Any, 
                     if not build_struct or mcls.FIELD_ATTR in cls.__dict__:
                         return cls
 
-                    # XXX: Maybe allow the transform the chance to update `__slots__`...?
-                    class_slots = cls.__dict__.get('__slots__', ())
-
+                    # TODO: preserve docstrings when slots is a mapping?
                     cls = mcls.TRANSFORMER(cls, **tsfm_kwargs)  # type: ignore
-
                     class_slots = tuple(
                         s for s in
                         itertools.chain(
-                            class_slots,
                             cls.__dict__.get(mcls.FIELD_ATTR, ()),
                             ('__weakref__',),
                         )
                         if s not in _slotted_members(cls)[len(class_slots):]  # type: ignore
                     )
-
                     class_dict = dict(cls.__dict__)
                     class_dict['__slots__'] = class_slots
                     class_dict['_struct_flag'] = True
