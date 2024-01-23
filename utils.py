@@ -1,4 +1,4 @@
-from typing import overload, Any, Mapping, Iterable, Callable, Sequence, TypeVar, Self
+from typing import overload, Any, Mapping, Iterable, Callable, Sequence, MutableSequence, TypeVar, Self
 import sys
 import enum
 import types
@@ -12,6 +12,8 @@ _T_co = TypeVar("_T_co", covariant=True)
 
 
 
+
+# [Dynamic Code Generation]
 
 def create_module(
     name : str,
@@ -102,6 +104,8 @@ def create_function(name: str, args: Sequence[str], body: Sequence[str], return_
 
 
 
+
+# [Inspection Tools]
 
 class PyTypeFlag(enum.IntFlag):
     """Python type bit masks (`type.__flags__`, `PyTypeObject.tp_flags`).
@@ -266,9 +270,36 @@ def is_sequence(o: Any) -> bool:
 
 
 
+# [Misc]
+
+def rotate_array(arr: Any, npos: int):
+    """Offset the contents of an array-like object by a set number of
+    positions in-place, and return the array.
+
+    Args:
+        - arr: List-like object to rotate.
+
+        - npos: Integer indicating the positional offset for *arr*s
+        contents.
+
+
+    *arr* must be a mutable sequence that supports slicing.
+
+    A positive *npos* value rotates contents to the right -- toward the
+    tail end -- of the array, while a negative value does the opposite.
+    """
+    arr_len = len(arr)
+    if arr_len == 0:
+        return arr
+
+    npos = -npos % arr_len  # use `deque.rotate` sign convention, which differs from slicing
+    arr[:] = arr[npos:arr_len] + arr[:npos]
+    return arr
 
 
 
+
+# [Descriptors]
 
 class classproperty(abstract.Property[_T_co]):
     """Creates class-bound, read-only properties.
@@ -411,3 +442,6 @@ class cachedproperty(abstract.Property[_T_co]):
         own needs.
         """
         return f"_{name}"
+
+
+

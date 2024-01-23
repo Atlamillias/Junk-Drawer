@@ -1,9 +1,11 @@
-from typing import overload, Any, TypeVar, SupportsIndex, Hashable, Mapping, Sequence, Generic, Iterator, Callable, Self
+from typing import cast, overload, Any, TypeVar, SupportsIndex, Iterable, Hashable, Mapping, Sequence, MutableSequence, Literal, Generic, Iterator, Callable, Self
 import itertools
 import threading
-import contextlib
+import operator
 import collections.abc
+import array
 import types
+import enum
 import sys
 import abc
 
@@ -12,10 +14,13 @@ import abc
 
 T    = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
+N    = TypeVar("N", int, float)
 KT   = TypeVar("KT", bound=Hashable)
 VT   = TypeVar("VT")
 
 _MISSING = object()
+
+
 
 
 # [Slotted Class Mixins]
@@ -112,94 +117,174 @@ class Slotted(SlotState, DenyManagedDict):
 
 
 
-# [Composition ABCs]
+# [Composition "ABCs"]
 
-class Composed(Generic[T]):
+# ABCs in `typing` or `collections.abc` are designed to be VERY generalized.
+# Users need to implement one or more abstract methods, while others *should*
+# be re-implemented due to their less-than-ideal performance. Using the below
+# classes require only that `_object_value_` returns an object compatible with
+# the relevant API. They're also much more performant than the former since
+# an expectation is made as to which object (`._object_value_`) is being
+# operated on. Note that they are not truly "ABC"s as they aren't constructed
+# from `ABCMeta` (no metaclass problems).
+
+# NOTE: These implement the minimal public API of the composed object(s), but
+# the same cannot be said about their behavior. For example; they don't define
+# `__copy__`, `__replace__`, rich comparisons, and/or `__bool__` methods since
+# their implementations likely rely on some user-defined state. And in the case
+# of `__bool__`; it is not up to me to consider an unknown object "truthy" or
+# "falsy" based on only ONE aspect of its' state...
+
+
+class ComposedContainer(Generic[T]):
     """Generic base class for objects operating on an underlying subscriptable
-    container. Must implement an `_object_state_` method that returns a
-    subscriptable container.
+    container. Must define an `_object_value_` attribute or property that returns
+    a sized, iterable container.
     """
     __slots__ = ()
 
-    @abc.abstractmethod
-    def _object_state_(self) -> Sequence[T]:
-        """Must return the object's public state as a subscriptable container."""
-        return NotImplemented
+    _object_value_: Sequence[T]
+
+    def __getstate__(self) -> tuple[tuple[Any, ...], dict | None]:
+        return (self._object_value_,), None
 
     def __contains__(self, __value: Any) -> bool:
-        return __value in self._object_state_()
-
-    def __getitem__(self, __key: Any) -> T:
-        return self._object_state_()[__key]
+        return __value in self._object_value_
 
     def __iter__(self) -> Iterator[T]:
-        return iter(self._object_state_())
+        return iter(self._object_value_)
 
     def __len__(self) -> int:
-        return len(self._object_state_())
+        return len(self._object_value_)
 
 
-class Keyed(Composed, Generic[KT, VT]):
+class Keyed(ComposedContainer, Generic[KT, VT]):
     """Generic base class for iterables supporting hashable subscript.
-    Must implement an `_object_state_` method that returns a map-like
-    object."""
+    Must define an `_object_value_` attribute or property that returns
+    a mapping-like object.
+    """
     __slots__ = ()
 
-    __abc_tpflags__ = 1 << 6 # Py_TPFLAGS_MAPPING
+    _object_value_: Mapping[KT, VT]
 
-    @abc.abstractmethod
-    def _object_state_(self) -> Mapping[KT, VT]:
-        """Must return the object's public state as a mapping."""
-        return NotImplemented
+    def __getitem__(self, __key: KT) -> VT:
+        return self._object_value_[__key]
 
     @overload
     def get(self, __key: KT, /) -> VT: ...
     @overload
     def get(self, __key: KT, __default: Any, /) -> VT | Any: ...
     def get(self, *args):
-        return self._object_state_().get(*args)
+        return self._object_value_.get(*args)
 
 
 class Mapped(Keyed[KT, VT]):
-    """Generic base class for mapping-like objects. Must implement an
-    `_object_state_` method that returns a map-like object."""
+    """Generic base class for immutable mappings. Must define an
+    `_object_value_` attribute or property that returns a mapping.
+
+    Mutable mappings should implement the `__setitem__` and `update`
+    methods.
+    """
     __slots__ = ()
 
-    def items(self):
-        return collections.abc.ItemsView(self._object_state_())
+    __abc_tpflags__ = 1 << 6 # Py_TPFLAGS_MAPPING
 
-    def keys(self):
-        return collections.abc.KeysView(self._object_state_())
+    @overload
+    def items(self): ...  # type: ignore[override]
+    def items(self, *, __view=collections.abc.ItemsView):
+        return __view(self._object_value_)
 
-    def values(self):
-        return collections.abc.ValuesView(self._object_state_())
+    @overload
+    def keys(self): ...  # type: ignore[override]
+    def keys(self, *, __view=collections.abc.KeysView):
+        return __view(self._object_value_)
+
+    @overload
+    def values(self): ...  # type: ignore[override]
+    def values(self, *, __view=collections.abc.ValuesView):
+        return __view(self._object_value_)
 
 
-class Indexed(Composed[T]):
-    """Generic base class for iterables supporting zero-indexed subscript.
-    Must implement an `_object_state_` method that returns a sequence-like
-    object.
+class Indexed(ComposedContainer[T]):
+    """Generic base class for immutable sequences. Must define an
+    `_object_value_` attribute or property that returns a sequence.
+
+    Note that it is left to the user, if desired, to implement slicing
+    behavior as sequences are not required to support slicing. To do so,
+    it is best to override `__getitem__` to return a shallow copy of the
+    whole object upon slicing; with the copy's `_object_value_` set to
+    the result of slicing the original's `_object_value_`.
     """
     __slots__ = ()
 
     __abc_tpflags__ = 1 << 5 # Py_TPFLAGS_SEQUENCE
 
-    @abc.abstractmethod
-    def _object_state_(self) -> Sequence[T]:
-        """Must return the object's public state as a mapping."""
-        return NotImplemented
+    _object_value_: Sequence[T]
 
     def __getitem__(self, __index: SupportsIndex):
-        return self._object_state_()[__index]
+        return self._object_value_[__index]
 
-    def __reversed__(self) -> Iterator[T]:
-        yield from reversed(self._object_state_())
+    @overload
+    def __reversed__(self) -> Iterator[T]: ...  # type: ignore[override]
+    def __reversed__(self, *, __reversed=reversed) -> Iterator[T]:
+        yield from __reversed(self._object_value_)
 
     def index(self, __value: T, __start: int = 0, __stop: int = sys.maxsize, /) -> int:
-        return self._object_state_().index(__value, __start, __stop)
+        return self._object_value_.index(__value, __start, __stop)
 
     def count(self, __value: Any, /) -> int:
-        return self._object_state_().count(__value)
+        return self._object_value_.count(__value)
+
+
+class Arrayed(Indexed[T]):
+    """Generic base class for mutable sequences. Must define an
+    `_object_value_` attribute or property that returns a mutable
+    sequence.
+
+    Note that it is left to the user, if desired, to implement slicing
+    behavior as sequences are not required to support slicing. To do so,
+    it is best to override `__getitem__` to return a shallow copy of the
+    whole object upon slicing; with the copy's `_object_value_` set to
+    the result of slicing the original's `_object_value_`. `__delitem__`
+    should also be overidden to handle slices.
+    """
+    __slots__ = ()
+
+    _object_value_: MutableSequence[T]
+
+    def __setitem__(self, __key: SupportsIndex, __value: T) -> None:
+        self._object_value_[__key] = __value
+
+    def __delitem__(self, __key: SupportsIndex) -> None:
+        del self._object_value_[__key]
+
+    def __add__(self, __value: Sequence[T]) -> Self:
+        self._object_value_.extend(__value)  # can't set -- it may not be writable!
+        return self
+
+    __iadd__ = __radd__ = __add__
+
+    def append(self, __value: T):
+        self._object_value_.append(__value)
+
+    def extend(self, __iterable: Iterable[T]):
+        self._object_value_.extend(__iterable)
+
+    def insert(self, __index: int, __value: T) -> None:
+        self._object_value_.insert(__index, __value)
+
+    def pop(self, __index: int = -1) -> T:
+        return self._object_value_.pop(__index)
+
+    def remove(self, __value: T) -> None:
+        self._object_value_.remove(__value)
+
+    def reverse(self):
+        self._object_value_.reverse()
+
+
+
+
 
 
 
@@ -426,3 +511,67 @@ class Property(Generic[T_co], metaclass=PropertyType):
 
     def deleter(self, fdel: Callable[[Any], Any]):
         return self.__replace__(fdel=fdel)
+
+
+
+
+# [Enumerations]
+
+class StrEnum(str, enum.Enum):
+    """Identical to `enum.StrEnum` in Python 3.11  (implements `__str__` to
+    return the member's value)
+    ."""
+
+    def __str__(self):
+        return self._value_
+
+
+class MultiEnum(enum.Enum):
+    """An enumeration type where members are associated with one or more
+    constants.
+    """
+    _values_: tuple[Any, ...]
+
+    def __new__(cls, *values):
+        assert values
+        try:
+            # bypass all of the EnumType crap
+            cache = type.__getattribute__(cls, '_alias_map_')
+        except AttributeError:
+            # `_alias_map_` contains aliases to their associated
+            # member. The value (member) is unknown at this point
+            # since `cls.__members__` is still being built at this
+            # time -- The "0_SETUP" key signals `cls._missing_`
+            # to fill in the members later.
+            cache = {"0_SETUP": None}
+            type.__setattr__(cls, '_alias_map_', cache)
+
+        value, *_consts = values
+        aliases = []
+        for v in _consts:
+            if value == v:
+                continue
+            if v in cache:
+                raise ValueError(f"{v!r} is already associated with another member")  # type: ignore
+            aliases.append(v)
+            cache[v] = None  # don't know the members' name yet!
+
+        self = object.__new__(cls)
+        self._value_  = value
+        self._values_ = tuple(aliases)
+        return self
+
+    def __eq__(self, other: Any):
+        return self._value_ == other or other in self._value_
+
+    @classmethod
+    def _missing_(cls, value: Any):
+        cache = getattr(cls, '_alias_map_')
+        # finish what was started during class creation and
+        # fill in the members
+        if '0_SETUP' in cache:
+            for member in cls.__members__.values():
+                for alias in member._values_:
+                    cache[alias] = member
+            del cache['0_SETUP']
+        return cache.get(value, None)

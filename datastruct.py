@@ -4,8 +4,9 @@ import inspect
 import functools
 import itertools
 import dataclasses
+from dataclasses import field as field
 from typing import (
-    Any, Callable, Mapping, Generator,
+    Any, Callable, Mapping,
     TypeVar, ParamSpec,
     overload, dataclass_transform as dataclass_transform
 )
@@ -23,8 +24,8 @@ def _cast_object(target: Any, source: _T) -> _T:
 
 
 def _slotted_members(cls: type) -> list[str]:
-    # This is an expensive procedure, but it cannot be cached -- class
-    # dictionaries are mutable. Slots found on a class once may not
+    # This is an expensive procedure, but it cannot be cached. Class
+    # dictionaries are mutable, so slots found on a class once may not
     # exist later (unlikely, but possible).
     member_descriptor = types.MemberDescriptorType
     _seen = set()
