@@ -1,7 +1,10 @@
 from typing import overload, Any, Mapping, Iterable, Callable, Sequence, Generic, TypeVar, Self
+from pathlib import Path
+import os
 import sys
 import enum
 import types
+import platform
 import threading
 import abstract
 
@@ -524,3 +527,39 @@ def rotate_array(arr: Any, npos: int):
     npos = -npos % arr_len  # use `deque.rotate` sign convention, which differs from slicing
     arr[:] = arr[npos:arr_len] + arr[:npos]
     return arr
+
+
+def userdata_path(system: str = '', /) -> Path:
+    """Return the path equivelent to Window's localappdata folder for
+    the running or otherwise specified system.
+
+    Supported systems are Windows, Android, MacOS, and Linux.
+
+    Args:
+        - system: Accepted (case-insensitive) values are 'windows', 'java',
+        'darwin', 'linux', or an empty string. An empty string will default
+        to the currently running OS.
+    """
+    system = (system or platform.system()).lower()
+
+    if system == 'windows':
+        # 'C:\Users\{username}\AppData\Local'
+        return Path(os.environ['LOCALAPPDATA'])
+
+    if system == 'darwin':
+        # '/Users/{username}/Library/Application Support'
+        return Path(os.environ['HOME'], 'Library', 'Application Support')
+
+    if system == 'java':
+        # '/data/data'
+        return Path('data', 'data')
+
+    if system == 'linux':
+        try:
+            return Path(os.environ['XDG_DATA_HOME'])
+        except KeyError:
+            pass
+        # '/.local/share'
+        return Path(os.environ['HOME'], '.local', 'share')
+
+    raise SystemError(f"unsupported OS {system!r}")
