@@ -13,6 +13,8 @@ else:
 
 
 _T = TypeVar("_T")
+_KT = TypeVar("_KT")
+_VT = TypeVar("_VT")
 _T_co = TypeVar("_T_co", covariant=True)
 _T_contra = TypeVar("_T_contra", contravariant=True)
 
@@ -23,6 +25,7 @@ _T_contra = TypeVar("_T_contra", contravariant=True)
 # not validate the inner type though, so this only improves type
 # visibility in a literal sense (i.e. a person reading the code).
 Buffer = TypeAliasType("Buffer", _Buffer, type_params=(_T,))
+Mappable = TypeAliasType("Mappable", Mapping[_KT, _VT] | Sequence[tuple[_KT, _VT]], type_params=(_KT, _VT))
 Array = array.ArrayType
 StrPath = str | pathlib.Path
 MappingProxy = types.MappingProxyType
@@ -31,6 +34,8 @@ Method = types.MethodType
 Date = datetime.date
 Time = datetime.time
 DateTime = datetime.datetime
+
+
 
 
 class SupportsRichComp(Protocol):
@@ -88,7 +93,7 @@ SizedArray.register(tuple)        # type: ignore
 
 
 try:
-    import numpy as np
+    import numpy as np  # type: ignore
 
     _NpDataType = TypeVar("_NpDataType", bound=np.generic)
 
