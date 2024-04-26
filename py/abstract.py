@@ -1,5 +1,6 @@
 import itertools
 import threading
+import collections
 import collections.abc
 import types
 import enum
@@ -17,12 +18,13 @@ from typing import (
     Generic,
     Iterator,
     Callable,
+    ParamSpec,
     Self
 )
 
 
 
-
+P    = ParamSpec("P")
 T    = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 N    = TypeVar("N", int, float)
@@ -299,7 +301,6 @@ class Arrayed(Indexed[T]):
 
 
 
-
 # [Descriptors]
 
 _PROPERTY_TYPE_INIT      = '_PropertyType__init'            # indicates instance docstrings of the "readying" class are writable
@@ -360,6 +361,9 @@ class PropertyType(type):
         namespace,
         **kwargs,
     ):
+        # "subclasses" `property` for type checkers, but is not a
+        # true subclass
+        bases = tuple(b for b in bases if b is not property)
         # [once per inheritance tree] ensure that instance docstrings
         # will be writable
         if not any(hasattr(b, _PROPERTY_TYPE_INIT) for b in bases):
@@ -388,7 +392,7 @@ class PropertyType(type):
         return issubclass(cls, property)
 
 
-class Property(Generic[T_co], metaclass=PropertyType):
+class Property(Generic[T_co], property, metaclass=PropertyType):
     """A fully-extensible emulation of the built-in `property`
     class. Derived classes are considered subclasses of `property`.
 
@@ -517,10 +521,10 @@ class Property(Generic[T_co], metaclass=PropertyType):
     def getter(self, fget: Callable[[Any], T]):
         return self.__replace__(fget=fget)
 
-    def setter(self, fset: Callable[[Any, Any], Any]):
+    def setter(self, fset: Callable[[Any, Any], Any]) -> Self:
         return self.__replace__(fset=fset)
 
-    def deleter(self, fdel: Callable[[Any], Any]):
+    def deleter(self, fdel: Callable[[Any], Any]) -> Self:
         return self.__replace__(fdel=fdel)
 
 
