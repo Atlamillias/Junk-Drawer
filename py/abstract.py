@@ -1,11 +1,11 @@
+import sys
+import enum
+import types
 import itertools
 import threading
 import collections
 import collections.abc
-import types
-import enum
-import sys
-from typing import (
+from .typing import (
     overload,
     Any,
     TypeVar,
@@ -13,15 +13,16 @@ from typing import (
     Iterable,
     Hashable,
     Mapping,
+    MutableMapping,
     Sequence,
     MutableSequence,
     Generic,
     Iterator,
     Callable,
+    Protocol,
     ParamSpec,
-    Self
+    Self,
 )
-
 
 
 P    = ParamSpec("P")
@@ -130,7 +131,7 @@ class Slotted(SlotState, DenyManagedDict):
 
 
 
-# [Composition "ABCs"]
+# [Composition ABCs]
 
 # ABCs in `typing` or `collections.abc` are designed to be VERY generalized.
 # Users need to implement one or more abstract methods, while others *should*
@@ -138,25 +139,24 @@ class Slotted(SlotState, DenyManagedDict):
 # classes require only that `_object_value_` returns an object compatible with
 # the relevant API. They're also much more performant than the former since
 # an expectation is made as to which object (`._object_value_`) is being
-# operated on. Note that they are not truly "ABC"s as they aren't constructed
-# from `ABCMeta` (no metaclass problems).
+# operated on.
+# These implement the minimal public API of the composed object(s), but the
+# same cannot be said about their behavior. For example; they don't define
+# `__copy__`, `__replace__`, or rich comparison.
 
-# NOTE: These implement the minimal public API of the composed object(s), but
-# the same cannot be said about their behavior. For example; they don't define
-# `__copy__`, `__replace__`, rich comparisons, and/or `__bool__` methods since
-# their implementations likely rely on some user-defined state. And in the case
-# of `__bool__`; it is not up to me to consider an unknown object "truthy" or
-# "falsy" based on only ONE aspect of its' state...
+class AbstractComposition(Protocol):
+    """Base class for classes that wrap other objects.
 
-
-class ComposedContainer(Generic[T]):
-    """Generic base class for objects operating on an underlying subscriptable
-    container. Must define an `_object_value_` attribute or property that returns
-    a sized, iterable container.
+    Instances of a base composition class must have a `_object_value_`
+    attribute pointing to the wrapped object.
     """
     __slots__ = ()
 
-    _object_value_: Sequence[T]
+    _object_value_: Any
+
+
+class ComposedCollection(AbstractComposition, Generic[T]):
+    __slots__ = ()
 
     def __getstate__(self) -> tuple[tuple[Any, ...], dict | None]:
         return (self._object_value_,), None
@@ -171,76 +171,84 @@ class ComposedContainer(Generic[T]):
         return len(self._object_value_)
 
 
-class Keyed(ComposedContainer, Generic[KT, VT]):
-    """Generic base class for iterables supporting hashable subscript.
-    Must define an `_object_value_` attribute or property that returns
-    a mapping-like object.
-    """
+class KeyItemGet(ComposedCollection[KT], Generic[KT, VT]):
     __slots__ = ()
-
-    _object_value_: Mapping[KT, VT]
 
     def __getitem__(self, __key: KT) -> VT:
         return self._object_value_[__key]
 
+    def get(self, __key: KT, __default: Any = None, /) -> VT | Any:
+        return self._object_value_.get(__key, __default)
+
+
+class KeyItemSet(ComposedCollection[KT], Generic[KT, VT]):
+    __slots__ = ()
+
+    def __setitem__(self, __key: KT, __value: VT) -> Any:
+        self._object_value_[__key] = __value
+
     @overload
-    def get(self, __key: KT, /) -> VT: ...
+    def update(self, /, **kwargs) -> None: ...
     @overload
-    def get(self, __key: KT, __default: Any, /) -> VT | Any: ...
-    def get(self, *args):
-        return self._object_value_.get(*args)
+    def update(self, m: Mapping[KT, VT] | Iterable[tuple[KT, VT]], /, **kwargs: VT) -> None: ...
+    def update(self, m: Any = None, /, **kwargs: Any):
+        self._object_value_.update(m, **kwargs)
 
 
-class Mapped(Keyed[KT, VT]):
-    """Generic base class for immutable mappings. Must define an
-    `_object_value_` attribute or property that returns a mapping.
+class KeyItemDel(ComposedCollection[KT], Generic[KT, VT]):
+    __slots__ = ()
 
-    Mutable mappings should implement the `__setitem__` and `update`
-    methods.
-    """
+    def __delitem__(self, __key: KT) -> None:
+        del self._object_value_[__key]
+
+    def clear(self) -> None:
+        self._object_value_.clear()
+
+    @overload
+    def pop(self, __key: KT) -> VT: ...
+    @overload
+    def pop(self, __key: KT, __default: T) -> VT | T:  ...
+    def pop(self, __key: KT, __default: Any = _MISSING) -> Any:
+        if __default is not _MISSING:
+            return self._object_value_.pop(__key, __default)
+        return self._object_value_.pop(__key)
+
+    def popitem(self) -> tuple[KT, VT]:
+        return self._object_value_.popitem()
+
+
+class MapView(ComposedCollection[KT], Generic[KT, VT]):
+    __slots__ = ()
+
+    def items(self, /) -> collections.abc.ItemsView:
+        return collections.abc.ItemsView(self._object_value_)
+
+    def keys(self, /) -> collections.abc.KeysView:
+        return collections.abc.KeysView(self._object_value_)
+
+    def values(self, /) -> collections.abc.ValuesView:
+        return collections.abc.ValuesView(self._object_value_)
+
+
+class ComposedDict(KeyItemDel[KT, VT], KeyItemSet[KT, VT], KeyItemGet[KT, VT], MapView[KT, VT]):
     __slots__ = ()
 
     __abc_tpflags__ = 1 << 6 # Py_TPFLAGS_MAPPING
 
-    @overload
-    def items(self): ...  # type: ignore[override]
-    def items(self, *, __view=collections.abc.ItemsView):
-        return __view(self._object_value_)
-
-    @overload
-    def keys(self): ...  # type: ignore[override]
-    def keys(self, *, __view=collections.abc.KeysView):
-        return __view(self._object_value_)
-
-    @overload
-    def values(self): ...  # type: ignore[override]
-    def values(self, *, __view=collections.abc.ValuesView):
-        return __view(self._object_value_)
+    def __bool__(self) -> bool:
+        return bool(self._object_value_)
 
 
-class Indexed(ComposedContainer[T]):
-    """Generic base class for immutable sequences. Must define an
-    `_object_value_` attribute or property that returns a sequence.
 
-    Note that it is left to the user, if desired, to implement slicing
-    behavior as sequences are not required to support slicing. To do so,
-    it is best to override `__getitem__` to return a shallow copy of the
-    whole object upon slicing; with the copy's `_object_value_` set to
-    the result of slicing the original's `_object_value_`.
-    """
+
+class IndexItemGet(ComposedCollection[T]):
     __slots__ = ()
 
-    __abc_tpflags__ = 1 << 5 # Py_TPFLAGS_SEQUENCE
+    def __getitem__(self, __index: SupportsIndex, /) -> T:
+        return self._object_value_[__index]  # type: ignore
 
-    _object_value_: Sequence[T]
-
-    def __getitem__(self, __index: SupportsIndex):
-        return self._object_value_[__index]
-
-    @overload
-    def __reversed__(self) -> Iterator[T]: ...  # type: ignore[override]
-    def __reversed__(self, *, __reversed=reversed) -> Iterator[T]:
-        yield from __reversed(self._object_value_)
+    def __reversed__(self) -> Iterator[T]:
+        yield from reversed(self._object_value_)
 
     def index(self, __value: T, __start: int = 0, __stop: int = sys.maxsize, /) -> int:
         return self._object_value_.index(__value, __start, __stop)
@@ -249,27 +257,11 @@ class Indexed(ComposedContainer[T]):
         return self._object_value_.count(__value)
 
 
-class Arrayed(Indexed[T]):
-    """Generic base class for mutable sequences. Must define an
-    `_object_value_` attribute or property that returns a mutable
-    sequence.
-
-    Note that it is left to the user, if desired, to implement slicing
-    behavior as sequences are not required to support slicing. To do so,
-    it is best to override `__getitem__` to return a shallow copy of the
-    whole object upon slicing; with the copy's `_object_value_` set to
-    the result of slicing the original's `_object_value_`. `__delitem__`
-    should also be overidden to handle slices.
-    """
+class IndexItemSet(ComposedCollection[T]):
     __slots__ = ()
 
-    _object_value_: MutableSequence[T]
-
     def __setitem__(self, __key: SupportsIndex, __value: T) -> None:
-        self._object_value_[__key] = __value
-
-    def __delitem__(self, __key: SupportsIndex) -> None:
-        del self._object_value_[__key]
+        self._object_value_[__key] = __value  # type: ignore
 
     def __add__(self, __value: Sequence[T]) -> Self:
         self._object_value_.extend(__value)  # can't set -- it may not be writable!
@@ -277,14 +269,24 @@ class Arrayed(Indexed[T]):
 
     __iadd__ = __radd__ = __add__
 
-    def append(self, __value: T):
+    def append(self, __value: T) -> None:
         self._object_value_.append(__value)
 
-    def extend(self, __iterable: Iterable[T]):
+    def extend(self, __iterable: Iterable[T]) -> None:
         self._object_value_.extend(__iterable)
 
     def insert(self, __index: int, __value: T) -> None:
         self._object_value_.insert(__index, __value)
+
+    def reverse(self) -> None:
+        self._object_value_.reverse()
+
+
+class IndexItemDel(ComposedCollection[T]):
+    __slots__ = ()
+
+    def __delitem__(self, __key: SupportsIndex) -> None:
+        del self._object_value_[__key]  # type: ignore
 
     def pop(self, __index: int = -1) -> T:
         return self._object_value_.pop(__index)
@@ -292,8 +294,14 @@ class Arrayed(Indexed[T]):
     def remove(self, __value: T) -> None:
         self._object_value_.remove(__value)
 
-    def reverse(self):
-        self._object_value_.reverse()
+
+class ComposedList(IndexItemDel[T], IndexItemSet[T], IndexItemGet[T]):
+    __slots__ = ()
+
+    __abc_tpflags__ = 1 << 5 # Py_TPFLAGS_SEQUENCE
+
+    def __bool__(self):
+        return bool(self._object_value_)
 
 
 
@@ -406,6 +414,15 @@ class Property(Generic[T_co], property, metaclass=PropertyType):
 
     __slots__ = ('_fget', '_fset', '_fdel')
 
+    @overload
+    def __new__(cls, fget: Callable[[Any], T], fset: Callable[[Any, Any], Any] | None = ..., fdel: Callable[[Any], Any] | None = ..., doc: str | None = ...) -> Self: ...
+    @overload
+    def __new__(cls, fget: None = ..., fset: Callable[[Any, Any], Any] | None = ..., fdel: Callable[[Any], Any] | None = ..., doc: str | None = ...) -> Self: ...
+    @overload
+    def __new__(cls, *args, **kwargs) -> Any: ...
+    def __new__(cls, *args, **kwargs) -> Any: ...
+    del __new__
+
     def __init__(
         self,
         fget: Callable[[Any], T_co] | None = None,
@@ -459,20 +476,18 @@ class Property(Generic[T_co], property, metaclass=PropertyType):
             for k,v in state[1].items():
                 setattr(self, k, v)
 
-    def __copy__(self):
+    def __copy__(self) -> Self:
         p = self.__new__(type(self))
         p.__setstate__(self.__getstate__())
         return p
 
-    # FIXME: The return types for overloads 1 & 2 should be equivelent to
-    #        `type(self)[T]()` (different inner type)
     @overload
-    def __replace__(self, *, fget: Callable[[Any], T], fset: Callable[[Any, Any], Any] | None = ..., fdel: Callable[[Any], Any] | None = ..., doc : str | None = ..., **kwargs) -> Self: ...
+    def __replace__(self, *, fget: Callable[[Any], T], fset: Callable[[Any, Any], Any] | None = ..., fdel: Callable[[Any], Any] | None = ..., doc : str | None = ..., **kwargs) -> 'Property[T]': ...
     @overload
     def __replace__(self, *, fget: None, fset: Callable[[Any, Any], Any] | None = ..., fdel: Callable[[Any], Any] | None = ..., doc : str | None = ..., **kwargs) -> Self: ...
     @overload
     def __replace__(self, *, fset: Callable[[Any, Any], Any] | None = ..., fdel: Callable[[Any], Any] | None = ..., doc : str | None = ..., **kwargs) -> Self: ...
-    def __replace__(self, *, fget: Callable[[Any], T] | Any = _MISSING, fset: Any = _MISSING, fdel: Any = _MISSING, doc: Any = _MISSING, **kwargs):  # type: ignore
+    def __replace__(self, *, fget: Any = _MISSING, fset: Any = _MISSING, fdel: Any = _MISSING, doc: Any = _MISSING, **kwargs) -> Any:
         # XXX: The `__replace__` method is considered a "standard" Python
         # behavior method as of Python 3.12.
         prop_state, user_state = self.__getstate__()
@@ -519,12 +534,15 @@ class Property(Generic[T_co], property, metaclass=PropertyType):
             raise AttributeError(f"cannot delete read-only attribute of {type(inst).__name__!r} object")
 
     def getter(self, fget: Callable[[Any], T]):
+        """Return a copy of this property with a different getter."""
         return self.__replace__(fget=fget)
 
     def setter(self, fset: Callable[[Any, Any], Any]) -> Self:
+        """Return a copy of this property with a different setter."""
         return self.__replace__(fset=fset)
 
     def deleter(self, fdel: Callable[[Any], Any]) -> Self:
+        """Return a copy of this property with a different deleter."""
         return self.__replace__(fdel=fdel)
 
 
